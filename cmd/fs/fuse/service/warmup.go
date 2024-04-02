@@ -21,7 +21,7 @@ var pool *ants.Pool
 
 const batchSize = 100000
 const poolSize = 100
-const minxFileCount = 20
+const minxFileCount = 10
 
 var processNum int
 var processNumLock sync.RWMutex
