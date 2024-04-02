@@ -160,17 +160,12 @@ func newKvMeta(fsMeta common.FSMeta, links map[string]common.FSMeta, config Conf
 	err = m.client.Txn(func(tx kv.KvTxn) error {
 		inodeVale := tx.Get(m.nextInodeKey())
 		if string(inodeVale) == "" || !config.ReUse {
-			key := m.nextInodeKey()
 			value := []byte(strconv.Itoa(int(rootInodeID)))
-			errTx := tx.Set(key, value)
+			errTx := tx.Set(m.nextInodeKey(), value)
 			return errTx
 		}
 		return nil
 	})
-	if err != nil {
-		log.Errorf("new inode err %v", err)
-		return nil, err
-	}
 
 	return m, nil
 }
@@ -192,7 +187,7 @@ func (m *kvMeta) UpdateUFSMap(fsMetas map[string]common.FSMeta) error {
 }
 
 func newUFS(fsMeta common.FSMeta) (ufslib.UnderFileStorage, error) {
-	log.Debugf("begin to new UFS: fsMeta[%+v]", fsMeta)
+	log.Infof("begin to new UFS: fsMeta[%+v]", fsMeta)
 	properties := make(map[string]interface{})
 	for k, v := range fsMeta.Properties {
 		properties[k] = v
@@ -346,6 +341,7 @@ func (m *kvMeta) newNextInode() (Ino, error) {
 		value = tx.Get(key)
 		inodeRaw, err := strconv.Atoi(string(value))
 		if err != nil {
+			log.Errorf("atoi error key [%s] value [%s] [%v]", string(key), string(value), err)
 			return err
 		}
 		nextInode = Ino(inodeRaw + 1)
@@ -719,7 +715,7 @@ func (m *kvMeta) Lookup(ctx *Context, parent Ino, name string) (inode Ino, attr 
 			}
 			err = tx.Set(m.entryKey(parent, name), m.marshalEntry(entryItem_))
 			if err != nil {
-				log.Errorf("tx set error %v", err)
+				log.Debugf("tx set error %v", err)
 				return err
 			}
 		}
@@ -793,7 +789,7 @@ func (m *kvMeta) GetAttr(ctx *Context, inode Ino, attr *Attr) (errNo syscall.Err
 
 		now := time.Now()
 		inodeItem_.attr = *attr
-		inodeItem_.expire = now.Add(m.attrTimeOut + time.Hour*100).Unix()
+		inodeItem_.expire = now.Add(m.attrTimeOut + time.Hour*4800).Unix()
 		err := m.set(m.inodeKey(inode), m.marshalInode(inodeItem_))
 		if err != nil {
 			log.Errorf("set error %v", err)
@@ -854,7 +850,9 @@ func (m *kvMeta) GetAttr(ctx *Context, inode Ino, attr *Attr) (errNo syscall.Err
 }
 
 func (m *kvMeta) SetAttr(ctx *Context, inode Ino, set uint32, attr *Attr) (string, syscall.Errno) {
-	log.Debugf("kv meta setattr inode[%v] and set [%v] %+v", inode, set, attr)
+	defer func() {
+		log.Debugf("kv meta setattr inode[%v] and set [%v] %+v", inode, set, attr)
+	}()
 	var absolutePath string
 	var cur inodeItem
 	var ufs_ ufslib.UnderFileStorage
@@ -961,6 +959,9 @@ func (m *kvMeta) Fallocate(ctx *Context, inode Ino, mode uint8, off uint64, size
 }
 
 func (m *kvMeta) ReadLink(ctx *Context, inode Ino, path *[]byte) syscall.Errno {
+	defer func() {
+		log.Debugf("ReadLink %v path[%s]", inode, string(*path))
+	}()
 	attr := &inodeItem{}
 	now := time.Now()
 	err := m.txn(func(tx kv.KvTxn) error {
@@ -1076,6 +1077,9 @@ func (m *kvMeta) Symlink(ctx *Context, parent Ino, name string, path string, ino
 }
 
 func (m *kvMeta) Mknod(ctx *Context, parent Ino, name string, _type uint8, mode, cumask uint32, rdev uint32, inode *Ino, attr *Attr) syscall.Errno {
+	defer func() {
+		log.Debugf("mknod parent[%v] name[%s] mode[%v] cumask[%v] inode[%v]", parent, name, mode, cumask, inode)
+	}()
 	insertInodeItem_ := &inodeItem{}
 	if attr == nil {
 		attr = &Attr{}
@@ -1155,6 +1159,9 @@ func (m *kvMeta) Mknod(ctx *Context, parent Ino, name string, _type uint8, mode,
 }
 
 func (m *kvMeta) Mkdir(ctx *Context, parent Ino, name string, mode uint32, cumask uint16, inode *Ino, attr *Attr) syscall.Errno {
+	defer func() {
+		log.Debugf("mkdir parent[%v] name[%s] inode[%v] mode[%v] cumask[%v] attr[%v]", parent, name, inode, mode, cumask, attr)
+	}()
 	insertInodeItem_ := &inodeItem{}
 	if attr == nil {
 		attr = &Attr{}
@@ -1238,7 +1245,9 @@ func (m *kvMeta) Mkdir(ctx *Context, parent Ino, name string, mode uint32, cumas
 }
 
 func (m *kvMeta) Unlink(ctx *Context, parent Ino, name string) syscall.Errno {
-	log.Debugf("kv meta Unlink parent[%v] name[%s]", parent, name)
+	defer func() {
+		log.Debugf("kv meta Unlink parent[%v] name[%s]", parent, name)
+	}()
 	var absolutePath string
 	entryItem_ := &entryItem{}
 	var isLink bool
@@ -1303,7 +1312,9 @@ func (m *kvMeta) Unlink(ctx *Context, parent Ino, name string) syscall.Errno {
 }
 
 func (m *kvMeta) Rmdir(ctx *Context, parent Ino, name string) syscall.Errno {
-	log.Debugf("kv meta Rmdir parent[%v] name[%s]", parent, name)
+	defer func() {
+		log.Debugf("kv meta Rmdir parent[%v] name[%s]", parent, name)
+	}()
 	var absolutePath string
 	inodeEntry := &entryItem{}
 	err := m.txn(func(tx kv.KvTxn) error {
@@ -1367,7 +1378,9 @@ func (m *kvMeta) Rmdir(ctx *Context, parent Ino, name string) syscall.Errno {
 }
 
 func (m *kvMeta) Rename(ctx *Context, parentSrc Ino, nameSrc string, parentDst Ino, nameDst string, flags uint32, inode *Ino, attr *Attr) (string, string, syscall.Errno) {
-	log.Debugf("kv meta rename parentSrc[%v]'s[%s] to parentDst[%v]'s[%s]", parentSrc, nameSrc, parentDst, nameDst)
+	defer func() {
+		log.Debugf("kv meta rename parentSrc[%v]'s[%s] to parentDst[%v]'s[%s]", parentSrc, nameSrc, parentDst, nameDst)
+	}()
 	var pathDst string
 	var pathSrc string
 	srcAttr := &inodeItem{}
@@ -1789,7 +1802,9 @@ func (m *kvMeta) Readdir(ctx *Context, inode Ino, entries *[]*Entry) syscall.Err
 }
 
 func (m *kvMeta) Create(ctx *Context, parent Ino, name string, mode uint32, cumask uint16, flags uint32, inode *Ino, attr *Attr) (ufslib.UnderFileStorage, string, syscall.Errno) {
-	log.Debugf("kv meta create parent[%v] name[%s]", parent, name)
+	defer func() {
+		log.Debugf("kv meta create parent[%v] name[%s]", parent, name)
+	}()
 	ino, err := m.newNextInode()
 	*inode = ino
 	if err != nil {
@@ -1878,7 +1893,9 @@ func (m *kvMeta) Create(ctx *Context, parent Ino, name string, mode uint32, cuma
 }
 
 func (m *kvMeta) Open(ctx *Context, inode Ino, flags uint32, attr *Attr) (ufslib.UnderFileStorage, string, syscall.Errno) {
-	log.Debugf("kv meta Open inode[%v]", inode)
+	defer func() {
+		log.Debugf("kv meta Open inode[%v] attr[%+v]", inode, attr)
+	}()
 	inodeItem_ := &inodeItem{}
 	if inode == rootInodeID {
 		now := time.Now()
@@ -1992,6 +2009,9 @@ func (m *kvMeta) Read(ctx *Context, inode Ino, indx uint32, buf []byte) syscall.
 }
 
 func (m *kvMeta) Write(ctx *Context, inode Ino, off uint64, length int) syscall.Errno {
+	defer func() {
+		log.Debugf("Write inode[%v] off[%v] length[%v]", inode, off, length)
+	}()
 	updateInodeItem := &inodeItem{}
 
 	err := m.txn(func(tx kv.KvTxn) error {
