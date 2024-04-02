@@ -167,6 +167,10 @@ func newKvMeta(fsMeta common.FSMeta, links map[string]common.FSMeta, config Conf
 		}
 		return nil
 	})
+	if err != nil {
+		log.Errorf("new inode err %v", err)
+		return nil, err
+	}
 
 	return m, nil
 }
