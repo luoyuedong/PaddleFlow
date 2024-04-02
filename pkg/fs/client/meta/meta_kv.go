@@ -157,6 +157,16 @@ func newKvMeta(fsMeta common.FSMeta, links map[string]common.FSMeta, config Conf
 		m.pathCache = pathCache
 		m.pathTimeOut = config.PathCacheExpire
 	}
+	err = m.client.Txn(func(tx kv.KvTxn) error {
+		inodeVale := tx.Get(m.nextInodeKey())
+		if string(inodeVale) == "" || !config.ReUse {
+			key := m.nextInodeKey()
+			value := []byte(strconv.Itoa(int(rootInodeID)))
+			errTx := tx.Set(key, value)
+			return errTx
+		}
+		return nil
+	})
 
 	return m, nil
 }
@@ -202,7 +212,7 @@ func newClient(config kv.Config) (kv.KvClient, error) {
 	var err error
 	switch config.Driver {
 	case kv.DiskType, kv.MemType:
-		if config.CachePath != "" {
+		if config.CachePath != "" && !config.ReUse {
 			config.CachePath = filepath.Join(config.CachePath, config.FsID,
 				strconv.Itoa(int(time.Now().Unix()))+"_"+utils.GetRandID(5))
 			MetaCachePath = config.CachePath
@@ -210,6 +220,10 @@ func newClient(config kv.Config) (kv.KvClient, error) {
 		client, err = kv.NewBadgerClient(config)
 	default:
 		return nil, fmt.Errorf("unknown meta client")
+	}
+	if err != nil {
+		log.Errorf("new client err %v", err)
+		return nil, err
 	}
 	return client, err
 }
@@ -280,6 +294,10 @@ func (m *kvMeta) entryKey(parent Ino, name string) []byte {
 	return m.fmtKey("E", parent, "N", name)
 }
 
+func (m *kvMeta) nextInodeKey() []byte {
+	return m.fmtKey("NextInode")
+}
+
 func (m *kvMeta) get(key []byte) ([]byte, error) {
 	var value []byte
 	err := m.client.Txn(func(tx kv.KvTxn) error {
@@ -312,6 +330,33 @@ func (m *kvMeta) nextInode() (Ino, error) {
 	n := m.freeInodes.next
 	m.freeInodes.next++
 	return Ino(n + 2), nil
+}
+
+func (m *kvMeta) newNextInode() (Ino, error) {
+	m.freeMu.Lock()
+	defer m.freeMu.Unlock()
+	key := m.nextInodeKey()
+	var value []byte
+	var nextInode Ino
+	err := m.client.Txn(func(tx kv.KvTxn) error {
+		value = tx.Get(key)
+		inodeRaw, err := strconv.Atoi(string(value))
+		if err != nil {
+			return err
+		}
+		nextInode = Ino(inodeRaw + 1)
+		nextInodeString := strconv.Itoa(inodeRaw + 1)
+		err = tx.Set(key, []byte(nextInodeString))
+		if err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		log.Errorf("get next Inode err %v", err)
+		return 0, err
+	}
+	return nextInode, nil
 }
 
 func (m *kvMeta) parseInode(buf []byte, inode *inodeItem) {
@@ -607,6 +652,7 @@ func (m *kvMeta) Lookup(ctx *Context, parent Ino, name string) (inode Ino, attr 
 		return 0, nil, syscall.EIO
 	}
 	inodeItem_ := &inodeItem{}
+	var newInode Ino
 	if entry != nil {
 		entryItem_ := &entryItem{}
 		m.parseEntry(entry, entryItem_)
@@ -616,6 +662,12 @@ func (m *kvMeta) Lookup(ctx *Context, parent Ino, name string) (inode Ino, attr 
 			*attr = inodeItem_.attr
 			m.setPathCache(inode, inodeItem_)
 			return inode, attr, syscall.F_OK
+		}
+	} else {
+		newInode, err = m.newNextInode()
+		if err != nil {
+			log.Errorf("m newNextInode error %v", err)
+			return 0, nil, syscall.EIO
 		}
 	}
 
@@ -656,18 +708,14 @@ func (m *kvMeta) Lookup(ctx *Context, parent Ino, name string) (inode Ino, attr 
 		}
 
 		if entry == nil {
-			number, err := m.nextInode()
-			if err != nil {
-				return err
-			}
-			inode = number
+			inode = newInode
 			entryItem_ := &entryItem{
 				ino:  inode,
 				mode: attr.Mode,
 			}
 			err = tx.Set(m.entryKey(parent, name), m.marshalEntry(entryItem_))
 			if err != nil {
-				log.Debugf("tx set error %v", err)
+				log.Errorf("tx set error %v", err)
 				return err
 			}
 		}
@@ -962,7 +1010,7 @@ func (m *kvMeta) Symlink(ctx *Context, parent Ino, name string, path string, ino
 	// link设置无限大时间，永远不过期
 	insertInodeItem_.expire = now.Add(time.Hour * 876000).Unix()
 
-	ino, err := m.nextInode()
+	ino, err := m.newNextInode()
 	*inode = ino
 	if err != nil {
 		return utils.ToSyscallErrno(err)
@@ -1042,7 +1090,7 @@ func (m *kvMeta) Mknod(ctx *Context, parent Ino, name string, _type uint8, mode,
 	insertInodeItem_.name = []byte(name)
 	insertInodeItem_.expire = now.Add(m.attrTimeOut).Unix()
 
-	ino, err := m.nextInode()
+	ino, err := m.newNextInode()
 	*inode = ino
 	if err != nil {
 		return utils.ToSyscallErrno(err)
@@ -1120,7 +1168,7 @@ func (m *kvMeta) Mkdir(ctx *Context, parent Ino, name string, mode uint32, cumas
 	insertInodeItem_.name = []byte(name)
 	insertInodeItem_.expire = now.Add(m.attrTimeOut).Unix()
 
-	ino, err := m.nextInode()
+	ino, err := m.newNextInode()
 	*inode = ino
 	if err != nil {
 		return utils.ToSyscallErrno(err)
@@ -1461,7 +1509,6 @@ func (m *kvMeta) Readdir(ctx *Context, inode Ino, entries *[]*Entry) syscall.Err
 	now := time.Now()
 	var fromCache bool
 	if inode == rootInodeID {
-		log.Infof("root readdir %v", inode)
 		attrTmp := &Attr{}
 		err := m.GetAttr(ctx, inode, attrTmp)
 		if err != 0 {
@@ -1588,10 +1635,24 @@ func (m *kvMeta) Readdir(ctx *Context, inode Ino, entries *[]*Entry) syscall.Err
 				insertChildEntry.ino = childEntryItemFromCache.ino
 				insertChildEntry.mode = childEntryItemFromCache.mode
 			} else {
-				newInodeNumber, err := m.nextInode()
+				var value []byte
+				var nextInode Ino
+
+				value = tx.Get(m.nextInodeKey())
+				inodeRaw, err := strconv.Atoi(string(value))
 				if err != nil {
+					log.Errorf("inodeRaw err %v err %v", value, err)
 					return err
 				}
+				nextInode = Ino(inodeRaw + 1)
+				nextInodeString := strconv.Itoa(inodeRaw + 1)
+				err = tx.Set(m.nextInodeKey(), []byte(nextInodeString))
+				if err != nil {
+					log.Errorf("set nextInode err %v", err)
+					return err
+				}
+
+				newInodeNumber := nextInode
 				newInode = newInodeNumber
 				if dir.Attr.Type == TypeDirectory {
 					insertChildEntry.mode = uint32(utils.StatModeToFileMode(int(syscall.S_IFDIR | uint32(FuseConf.DirMode))))
@@ -1725,7 +1786,7 @@ func (m *kvMeta) Readdir(ctx *Context, inode Ino, entries *[]*Entry) syscall.Err
 
 func (m *kvMeta) Create(ctx *Context, parent Ino, name string, mode uint32, cumask uint16, flags uint32, inode *Ino, attr *Attr) (ufslib.UnderFileStorage, string, syscall.Errno) {
 	log.Debugf("kv meta create parent[%v] name[%s]", parent, name)
-	ino, err := m.nextInode()
+	ino, err := m.newNextInode()
 	*inode = ino
 	if err != nil {
 		return nil, "", utils.ToSyscallErrno(err)
