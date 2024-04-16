@@ -19,6 +19,7 @@ package ufs
 import (
 	"encoding/base64"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/colinmarc/hdfs/v2"
@@ -122,6 +123,12 @@ func NewHdfsWithKerberosFileSystem(properties map[string]interface{}) (UnderFile
 	nameNodeAddress := properties[common.NameNodeAddress].(string)
 	options := hdfs.ClientOptions{
 		Addresses: strings.Split(nameNodeAddress, ","),
+	}
+	useDatanodeHostname, ok := properties[common.UseDatanodeHostname].(string)
+	if ok {
+		if use, err := strconv.ParseBool(useDatanodeHostname); err == nil {
+			options.UseDatanodeHostname = use
+		}
 	}
 	krbConfig, _ := buildKerberosConf(properties)
 	if krbClient, err := NewKerberosClientWithKeyTab(krbConfig); err == nil {
