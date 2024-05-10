@@ -68,6 +68,7 @@ type MountPointController struct {
 	pvSynced   cache.InformerSynced
 
 	queue       workqueue.RateLimitingInterface
+	pvMapLock sync.Mutex
 	pvParamsMap map[string]pvParams
 }
 
@@ -202,7 +203,9 @@ func (m *MountPointController) UpdatePodMap() error {
 	pvs, err := client.ListPersistentVolume(metav1.ListOptions{})
 	for _, pv := range pvs.Items {
 		if pv.Spec.CSI != nil && pv.Spec.CSI.Driver == "paddleflowstorage" {
+			m.pvMapLock.Lock()
 			m.pvParamsMap[pv.Name] = buildPfsPvParams(pv.Spec.CSI.VolumeAttributes)
+			m.pvMapLock.Unlock()
 		}
 	}
 	return nil
@@ -245,7 +248,9 @@ func (m *MountPointController) handleRunningPod(pod v1.Pod, updateMounts bool) {
 
 func (m *MountPointController) CheckAndRemountVolumeMount(volumeMount volumeMountInfo) error {
 	// TODO(dongzezhao) get mountParameters from volumeMountInfo
+	m.pvMapLock.Lock()
 	pvParams_, ok := m.pvParamsMap[volumeMount.VolumeName]
+	m.pvMapLock.Unlock()
 	if !ok {
 		log.Errorf("get pfs parameters [%s] not exist", volumeMount.VolumeName)
 		return fmt.Errorf("get pfs parameters [%s] not exist", volumeMount.VolumeName)
@@ -402,7 +407,9 @@ func (m *MountPointController) pvAddedUpdated(obj interface{}) {
 
 	// update pv
 	if pv.Spec.StorageClassName == "paddleflowstorage" {
+		m.pvMapLock.Lock()
 		m.pvParamsMap[pv.Name] = buildPfsPvParams(pv.Spec.CSI.VolumeAttributes)
+		m.pvMapLock.Unlock()
 	}
 }
 
